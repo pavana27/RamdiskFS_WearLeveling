@@ -19,6 +19,9 @@
 #include <fnmatch.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <stdbool.h>
+#include <time.h>
 
 #include "rdstructs.h"
 #include <ctype.h>
@@ -79,26 +82,37 @@ int path_search(const char *path)
 int print_info()
 {
 	int j, i, start, k=0, h=0;
+	FILE* fp = fopen ("/home/pavana/Documents/results.txt","w+");
+	FILE* fp1 = fopen ("/home/pavana/Documents/stats.txt","w+");
+	fprintf( fp, "filename, used_cycles, write_errors \n");
+	fprintf( fp1, "filename, young, middleaged, oldaged, retired \n");
 	for(i = 0; i < f.nnodes; i++) {
 		if ( f.nodes[i].status == used ) {
 			printf("\n\n------File: %s---------\n", f.nodes[i].path);
 			start = f.nodes[i].start_block;
+			stats stats = f.nodes[i].stats;
+			fprintf(fp1, "%s, %d, %d, %d, %d \n",f.nodes[i].path, stats.young_blocks, 
+					stats.middleaged_blocks, stats.old_blocks, stats.retired_blocks);
+
 			j = 0;
 			while(start!=-1) {
-				printf("blockindex: %d status: %d content: %s\n", start,f.blocks[start].status, f.blocks[start].data);
+				if(f.blocks[start].used_cycles >= LIFE_TIME)
+					fprintf(fp, "%s, %d, %d \n",f.nodes[i].path, f.blocks[start].used_cycles, f.blocks[start].write_errors);
 				start = f.blocks[start].next_block;
 				j+=1;
 				if(start == f.blocks[start].next_block) {
 					break;
 				}
 			}
-			printf("------Blocks in file: %d----------\n",j);
+			//printf("------Blocks in file: %d----------\n",j);
 			k++;
 			h+=j;
 		}
 	}
-	printf("------Total Files: %d----------\n",k);
-	printf("------Total Blocks: %d----------\n",h);
+	fclose(fp);
+	fclose(fp1);
+	//printf("------Total Files: %d----------\n",k);
+	//printf("------Total Blocks: %d----------\n",h);
 
 	j = 0;
 	printf("\n\n------Reading Blocks---\n");
@@ -120,6 +134,12 @@ node* get_free_node()
 	for (i = 0; i < f.nnodes; i++) {
 		if ( f.nodes[i].status == unused ){
 			f.nodes[i].status = used;
+
+			f.nodes[i].stats.retired_blocks = 0;
+			f.nodes[i].stats.young_blocks=0;
+			f.nodes[i].stats.middleaged_blocks=0;
+			f.nodes[i].stats.old_blocks=0;
+			
 			return &f.nodes[i];
 		}
 	}
@@ -133,6 +153,8 @@ int get_free_block_index()
 	for (i = 0; i < f.nblocks; i++) {
 		if ( f.blocks[i].status == unusedblock ){
 			f.blocks[i].status = usedblock;
+			f.blocks[i].used_cycles = 0;
+			f.blocks[i].write_errors = 0;
 			return i;
 		}
 	}
@@ -168,6 +190,7 @@ int hello_init()
             blocks_init();
             fclose(fp);
             fprintf(stderr,"In else block");
+			//print_info();
         }
     }
     else {
@@ -180,6 +203,8 @@ int hello_init()
 
 void hello_destroy(void *v)
 {
+	print_info();
+
 	if (persistent == 1) {
 		fp = fopen(filename, "w");
 		if (fp != NULL) {
@@ -343,6 +368,38 @@ int hello_read(const char *path, char *buf, size_t size, off_t offset,
 	return size;
 }
 
+double getErrorProbability() {
+
+	return rand()/(double)RAND_MAX;
+}
+
+int updateStats(const char *path) {
+
+	int i = path_search(path);
+
+	if ( i < 0 ) {
+		return i;
+	}
+
+	int j = f.nodes[i].start_block;
+	while (j != -1) {
+		int used_cycles = f.blocks[j].used_cycles;
+		if(used_cycles <= YOUNG) {
+			f.nodes[i].stats.young_blocks ++;
+		} else if (used_cycles <= MIDDLEAGE) {
+			f.nodes[i].stats.middleaged_blocks ++;
+		} else if (used_cycles <= OLDAGE) {
+			f.nodes[i].stats.old_blocks ++;
+		} else if (used_cycles >= (1.2 * LIFE_TIME) ) {
+			f.nodes[i].stats.retired_blocks ++;
+		}
+
+		j = f.blocks[j].next_block;
+	}
+	
+	return 0;
+}
+
 int hello_write(const char *path, const char *buf, size_t size, off_t offset,
 		      struct fuse_file_info *fi)
 {
@@ -377,10 +434,41 @@ int hello_write(const char *path, const char *buf, size_t size, off_t offset,
 	
 	// write partial block
 	if ( offset > 0 ) {
-		memcpy(f.blocks[fileblock].data + offset, buf, size2-offset);
-		last = fileblock;
-		fileblock = f.blocks[fileblock].next_block;
-		offset = size2 - offset;
+
+		// check if used_cycles for this block < L
+		// if yes, generate the error random number e
+		// compare e with E,
+		// if greated than E, mark error in block
+		// regenerate e
+		int usedCycles = f.blocks[fileblock].used_cycles;
+		bool error = true;
+		if (usedCycles == 0 || usedCycles < LIFE_TIME) {
+			error = false;
+		} else {
+			f.blocks[fileblock].write_errors = f.blocks[fileblock].write_errors + 1;
+			f.blocks[fileblock].used_cycles = f.blocks[fileblock].used_cycles + 1;
+			double errorProb = getErrorProbability(); // this is e
+			while(errorProb > ERROR_LIMIT) { // compare with E
+				errorProb = getErrorProbability(); // regenerate e
+				f.blocks[fileblock].write_errors = f.blocks[fileblock].write_errors + 1; // increment errors count
+				f.blocks[fileblock].used_cycles = f.blocks[fileblock].used_cycles + 1;
+			}
+			error = false;
+		}
+
+		if(!error) {
+
+			// if the errors are greater than threshold,
+			// call get_free_block_index() to get new block
+			// release the old block.
+			// increment the used_cycles for each block write.
+			f.blocks[fileblock].used_cycles = f.blocks[fileblock].used_cycles + 1;
+
+			memcpy(f.blocks[fileblock].data + offset, buf, size2-offset);
+			last = fileblock;
+			fileblock = f.blocks[fileblock].next_block;
+			offset = size2 - offset;
+		}
 	}
 
 	// write to all other whole blocks
@@ -399,13 +487,47 @@ int hello_write(const char *path, const char *buf, size_t size, off_t offset,
 			f.blocks[last].next_block = fileblock;
 		}
 
-		memcpy(f.blocks[fileblock].data, buf + offset , size2);
-		last = fileblock;
-		fileblock = f.blocks[fileblock].next_block;
-		offset += size2;
+		// check if used_cycles for this block < L
+		// if yes, generate the error random number e
+		// compare e with E,
+		// if greated than E, mark error in block
+		// regenerate e
+
+		int usedCycles = f.blocks[fileblock].used_cycles;
+		bool error = true;
+		if (usedCycles == 0 || usedCycles < LIFE_TIME) {
+			error = false;			
+		} else {
+			f.blocks[fileblock].write_errors = f.blocks[fileblock].write_errors + 1;
+			f.blocks[fileblock].used_cycles = f.blocks[fileblock].used_cycles + 1;
+			double errorProb = getErrorProbability(); // this is e
+			while(errorProb > ERROR_LIMIT) { // compare with E
+				errorProb = getErrorProbability(); // regenerate e
+				f.blocks[fileblock].write_errors = f.blocks[fileblock].write_errors + 1; // increment errors count
+				f.blocks[fileblock].used_cycles = f.blocks[fileblock].used_cycles + 1;
+			}
+			error = false;
+		}
+
+		if(!error) {
+
+			// if the errors are greater than threshold,
+			// call get_free_block_index() to get new block
+			// release the old block.
+			
+			// increment the used_cycles for each block write.
+			f.blocks[fileblock].used_cycles = f.blocks[fileblock].used_cycles + 1;
+
+			memcpy(f.blocks[fileblock].data, buf + offset , size2);
+			last = fileblock;
+			fileblock = f.blocks[fileblock].next_block;
+			offset += size2;
+		}
 	}
 	
 	f.nodes[i].size += offset;
+
+	updateStats(path);
 	
 	return offset;	 
 }

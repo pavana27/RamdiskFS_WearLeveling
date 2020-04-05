@@ -1,1 +1,1 @@
-./ramdisk /home/prenukaiah/Documents/files 512 /home/prenukaiah/Documents/backupfile name: /home/prenukaiah/Documents/backup
+./ramdisk /home/pavana/Documents/files 512 /home/pavana/Documents/backupfile 
